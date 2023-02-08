@@ -17,6 +17,7 @@ import warnings
 import cv2
 import numpy as np
 import tqdm
+import os
 
 from detectron2.config import get_cfg
 from detectron2.data.detection_utils import read_image
@@ -25,11 +26,57 @@ from detectron2.utils.logger import setup_logger
 
 from mask2former import add_maskformer2_config
 from predictor import VisualizationDemo
-
+from PIL import Image
+from classes_mapping import std_labels, stuff2std
 
 # constants
 WINDOW_NAME = "mask2former demo"
-
+d3_40_colors_rgb: np.ndarray = np.array(
+    [
+        [1, 1, 1],
+        [31, 119, 180],
+        [174, 199, 232],
+        [255, 127, 14],
+        [255, 187, 120],
+        [44, 160, 44],
+        [152, 223, 138],
+        [214, 39, 40],
+        [255, 152, 150],
+        [148, 103, 189],
+        [197, 176, 213],
+        [140, 86, 75],
+        [196, 156, 148],
+        [227, 119, 194],
+        [247, 182, 210],
+        [127, 127, 127],
+        [199, 199, 199],
+        [188, 189, 34],
+        [219, 219, 141],
+        [23, 190, 207],
+        [158, 218, 229],
+        [57, 59, 121],
+        [82, 84, 163],
+        [107, 110, 207],
+        [156, 158, 222],
+        [99, 121, 57],
+        [140, 162, 82],
+        [181, 207, 107],
+        [206, 219, 156],
+        [140, 109, 49],
+        [189, 158, 57],
+        [231, 186, 82],
+        [231, 203, 148],
+        [132, 60, 57],
+        [173, 73, 74],
+        [214, 97, 107],
+        [231, 150, 156],
+        [123, 65, 115],
+        [165, 81, 148],
+        [206, 109, 189],
+        [222, 158, 214],
+    ],
+    dtype=np.uint8,
+)
 
 def setup_cfg(args):
     # load config from file and command-line arguments
@@ -50,13 +97,8 @@ def get_parser():
         metavar="FILE",
         help="path to config file",
     )
-    parser.add_argument("--webcam", action="store_true", help="Take inputs from webcam.")
-    parser.add_argument("--video-input", help="Path to video file.")
     parser.add_argument(
-        "--input",
-        nargs="+",
-        help="A list of space separated input images; "
-        "or a single glob pattern such as 'directory/*.jpg'",
+        "--input_root", type=str
     )
     parser.add_argument(
         "--output",
@@ -79,22 +121,58 @@ def get_parser():
     return parser
 
 
-def test_opencv_video_format(codec, file_ext):
-    with tempfile.TemporaryDirectory(prefix="video_format_test") as dir:
-        filename = os.path.join(dir, "test_file" + file_ext)
-        writer = cv2.VideoWriter(
-            filename=filename,
-            fourcc=cv2.VideoWriter_fourcc(*codec),
-            fps=float(30),
-            frameSize=(10, 10),
-            isColor=True,
-        )
-        [writer.write(np.zeros((10, 10, 3), np.uint8)) for _ in range(30)]
-        writer.release()
-        if os.path.isfile(filename):
-            return True
-        return False
+def map_by_dict(arr, mapping_dict):
+    # NOTE: check missing meta
+    # missing_key = set(np.unique(arr))-mapping_dict.keys()
+    # for k in missing_key:
+    #     mapping_dict[k] = -100
 
+    return np.vectorize(mapping_dict.get)(arr)
+
+def save_semantic_observation(pano_seg_raw, total_frames, colors_map, raw_labels, out_dir):
+    out_path = out_dir + '/sem_mask2former'
+    os.makedirs(out_path, exist_ok=True)
+
+    pano_seg, segments_info = pano_seg_raw
+    pano_seg = pano_seg.cpu().numpy()
+    msk = pano_seg == 0
+
+    ins_id2ins = {0: -100}
+    ins_id2label = {0: -100}
+
+    for info in segments_info:
+        ins_id2ins[info['id']] = info['id']
+        std_label = stuff2std[raw_labels[info['category_id']]]
+        if std_label is None:
+            ins_id2label[info['id']] = 0
+            ins_id2ins[info['id']] = 0
+            print('\n', raw_labels[info['category_id']], '\n')
+        else:
+            remapped_cat_id = std_labels.index(std_label)
+            ins_id2label[info['id']] = remapped_cat_id
+        # if info['isthing']:
+        #     ins_id2label[info['id']] = info['category_id']
+        # else:
+        #     ins_id2label[info['id']] = info['category_id'] + 80 # offset 80 for thing class
+    
+    label_obs = map_by_dict(pano_seg, ins_id2label)
+    ins_i_obs = map_by_dict(pano_seg, ins_id2ins) 
+
+    np.save(out_path+'/%d-label.npy'% total_frames, label_obs)
+    np.save(out_path+'/%d-instance.npy'% total_frames, ins_i_obs)
+
+    label_obs_rgb = colors_map[label_obs]
+    label_obs_rgb[msk] = [0,0,0]
+    semantic_img = Image.fromarray(label_obs_rgb.astype(np.uint8))
+    semantic_img.save(out_path+"/%d-label.png" % total_frames)
+    
+    ins_i_obs = ins_i_obs % 40 + 1
+    ins_i_obs[msk] = 0
+    ins_i_obs = ins_i_obs.flatten() 
+    semantic_img_ins = Image.new("P", (pano_seg.shape[1], pano_seg.shape[0]))
+    semantic_img_ins.putpalette(d3_40_colors_rgb.flatten())
+    semantic_img_ins.putdata((ins_i_obs).astype(np.uint8))
+    semantic_img_ins.save(out_path+"/%d-ins.png" % total_frames)
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
@@ -106,89 +184,52 @@ if __name__ == "__main__":
     cfg = setup_cfg(args)
 
     demo = VisualizationDemo(cfg)
+    meta = demo.metadata
 
-    if args.input:
-        if len(args.input) == 1:
-            args.input = glob.glob(os.path.expanduser(args.input[0]))
-            assert args.input, "The input path(s) was not found"
-        for path in tqdm.tqdm(args.input, disable=not args.output):
-            # use PIL, to be consistent with evaluation
-            img = read_image(path, format="BGR")
-            start_time = time.time()
-            predictions, visualized_output = demo.run_on_image(img)
-            logger.info(
-                "{}: {} in {:.2f}s".format(
-                    path,
-                    "detected {} instances".format(len(predictions["instances"]))
-                    if "instances" in predictions
-                    else "finished",
-                    time.time() - start_time,
-                )
+    thing_colors = meta.thing_colors
+    stuff_colors = meta.stuff_colors
+
+    raw_labels = meta.stuff_classes
+
+    # colors_map = np.array(thing_colors + stuff_colors)
+    colors_map = np.array(stuff_colors)
+
+    file_list = [file for file in os.listdir(args.input_root) if file.endswith('.png')]
+    
+    out_root = args.input_root.rsplit('/', 1)[0]
+    for file in tqdm.tqdm(file_list):
+        # use PIL, to be consistent with evaluation
+        tot_id = int(file.split('.')[0])
+
+        path = os.path.join(args.input_root, file)
+        img = read_image(path, format="BGR")
+        start_time = time.time()
+        predictions = demo.run_on_image(img)
+        
+        sem_seg = predictions["sem_seg"].argmax(dim=0).cpu().numpy()
+        
+        save_semantic_observation(predictions["panoptic_seg"], tot_id, colors_map, raw_labels, out_dir=out_root)
+
+        logger.info(
+            "{}: {} in {:.2f}s".format(
+                path,
+                "detected {} instances".format(len(predictions["instances"]))
+                if "instances" in predictions
+                else "finished",
+                time.time() - start_time,
             )
-
-            if args.output:
-                if os.path.isdir(args.output):
-                    assert os.path.isdir(args.output), args.output
-                    out_filename = os.path.join(args.output, os.path.basename(path))
-                else:
-                    assert len(args.input) == 1, "Please specify a directory with args.output"
-                    out_filename = args.output
-                visualized_output.save(out_filename)
-            else:
-                cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-                cv2.imshow(WINDOW_NAME, visualized_output.get_image()[:, :, ::-1])
-                if cv2.waitKey(0) == 27:
-                    break  # esc to quit
-    elif args.webcam:
-        assert args.input is None, "Cannot have both --input and --webcam!"
-        assert args.output is None, "output not yet supported with --webcam!"
-        cam = cv2.VideoCapture(0)
-        for vis in tqdm.tqdm(demo.run_on_video(cam)):
-            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-            cv2.imshow(WINDOW_NAME, vis)
-            if cv2.waitKey(1) == 27:
-                break  # esc to quit
-        cam.release()
-        cv2.destroyAllWindows()
-    elif args.video_input:
-        video = cv2.VideoCapture(args.video_input)
-        width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frames_per_second = video.get(cv2.CAP_PROP_FPS)
-        num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-        basename = os.path.basename(args.video_input)
-        codec, file_ext = (
-            ("x264", ".mkv") if test_opencv_video_format("x264", ".mkv") else ("mp4v", ".mp4")
         )
-        if codec == ".mp4v":
-            warnings.warn("x264 codec not available, switching to mp4v")
-        if args.output:
-            if os.path.isdir(args.output):
-                output_fname = os.path.join(args.output, basename)
-                output_fname = os.path.splitext(output_fname)[0] + file_ext
-            else:
-                output_fname = args.output
-            assert not os.path.isfile(output_fname), output_fname
-            output_file = cv2.VideoWriter(
-                filename=output_fname,
-                # some installation of opencv may not support x264 (due to its license),
-                # you can try other format (e.g. MPEG)
-                fourcc=cv2.VideoWriter_fourcc(*codec),
-                fps=float(frames_per_second),
-                frameSize=(width, height),
-                isColor=True,
-            )
-        assert os.path.isfile(args.video_input)
-        for vis_frame in tqdm.tqdm(demo.run_on_video(video), total=num_frames):
-            if args.output:
-                output_file.write(vis_frame)
-            else:
-                cv2.namedWindow(basename, cv2.WINDOW_NORMAL)
-                cv2.imshow(basename, vis_frame)
-                if cv2.waitKey(1) == 27:
-                    break  # esc to quit
-        video.release()
-        if args.output:
-            output_file.release()
-        else:
-            cv2.destroyAllWindows()
+        # if args.output:
+        #     if os.path.isdir(args.output):
+        #         assert os.path.isdir(args.output), args.output
+        #         out_filename = os.path.join(args.output, os.path.basename(path))
+        #     else:
+        #         assert len(args.input) == 1, "Please specify a directory with args.output"
+        #         out_filename = args.output
+        #     visualized_output.save(out_filename)
+        # else:
+        #     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+        #     cv2.imshow(WINDOW_NAME, visualized_output.get_image()[:, :, ::-1])
+        #     if cv2.waitKey(0) == 27:
+        #         break  # esc to quit
+
