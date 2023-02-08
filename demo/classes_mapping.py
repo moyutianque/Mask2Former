@@ -226,7 +226,7 @@ thing2std = {
 
 std_labels = set(list(stuff2std.values()) + list(thing2std.values()))
 std_labels.remove(None)
-std_labels = ['none'] + list(std_labels)
+std_labels = ['none'] + list(sorted(std_labels))
 
 print("Load ", len(std_labels), " labels as standard label")
 
