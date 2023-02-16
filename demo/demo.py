@@ -166,13 +166,14 @@ def save_semantic_observation(pano_seg_raw, total_frames, colors_map, raw_labels
     semantic_img = Image.fromarray(label_obs_rgb.astype(np.uint8))
     semantic_img.save(out_path+"/%d-label.png" % total_frames)
     
-    ins_i_obs = ins_i_obs % 40 + 1
-    ins_i_obs[msk] = 0
-    ins_i_obs = ins_i_obs.flatten() 
-    semantic_img_ins = Image.new("P", (pano_seg.shape[1], pano_seg.shape[0]))
-    semantic_img_ins.putpalette(d3_40_colors_rgb.flatten())
-    semantic_img_ins.putdata((ins_i_obs).astype(np.uint8))
-    semantic_img_ins.save(out_path+"/%d-ins.png" % total_frames)
+    # NOTE: uncomment to generate instance segmentation
+    # ins_i_obs = ins_i_obs % 40 + 1
+    # ins_i_obs[msk] = 0
+    # ins_i_obs = ins_i_obs.flatten() 
+    # semantic_img_ins = Image.new("P", (pano_seg.shape[1], pano_seg.shape[0]))
+    # semantic_img_ins.putpalette(d3_40_colors_rgb.flatten())
+    # semantic_img_ins.putdata((ins_i_obs).astype(np.uint8))
+    # semantic_img_ins.save(out_path+"/%d-ins.png" % total_frames)
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
